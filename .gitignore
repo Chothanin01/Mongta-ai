@@ -20,7 +20,7 @@ site_build
 venv
 docs.zip
 archive.zip
-fastapi-env
+venv-mongta
 
 # vim temporary files
 *~
