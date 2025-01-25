@@ -1,10 +1,10 @@
 $ Always activate Virtual Environment 
 
 Create Virtual Environment
-python -m venv fastapi-env
+python -m venv venv-mongta
 
 On Windows:
-fastapi-env\Scripts\activate
+venv-mongta\Scripts\activate
 
 On macOS and Linux:
 source fastapi-env/bin/activate
