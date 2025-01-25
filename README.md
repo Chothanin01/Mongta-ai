@@ -1,18 +1,22 @@
+$ Always Activate the virtual environment
 
-$ install python library form rquirement.txt
-pip install -r requirements.txt
+create virtual environment
+python -m venv fastapi-env
 
-$ How to run Fastapi
-
-1.Activate the virtual environment
-
+Activate by
 On Windows:
 fastapi-env\Scripts\activate
 
 On macOS and Linux:
 source fastapi-env/bin/activate
 
-2.Type in terminal 
+$ install python library form rquirement.txt
+pip install -r requirements.txt
+
+
+$ How to run Fastapi
+
+Type in terminal 
 uvicorn main:app --reload
 to run server
 
