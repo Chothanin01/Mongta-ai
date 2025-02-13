@@ -8,7 +8,7 @@ On Windows:
 venv-mongta\Scripts\activate
 
 On macOS and Linux:
-source fastapi-env/bin/activate
+source venv-mongta/bin/activate
 
 $ Install python library form rquirement.txt
 pip install -r requirements.txt
