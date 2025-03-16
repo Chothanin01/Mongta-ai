@@ -11,29 +11,31 @@ import matplotlib
 import matplotlib.pyplot as plt
 import uvicorn
 
-# ใช้งาน Agg backend ของ Matplotlib (ไม่ต้องใช้ display)
+# Use the Agg backend for Matplotlib (no display required)
 matplotlib.use('Agg')
 
 app = FastAPI()
 
-# กำหนดโฟลเดอร์สำหรับอัปโหลดและเก็บไฟล์ผลลัพธ์
+# Define directories for uploading and storing processed files
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# กำหนดนามสกุลที่อนุญาตและ MIME types
+# Allowed file extensions and MIME types
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
 MIME_TYPES = {"jpg": "image/jpg", "jpeg": "image/jpeg", "png": "image/png"}
 
-# Initialize Roboflow model
+# Initialize the Roboflow model
 rf = Roboflow(api_key="mJRJtBYRhInoDZPAzrv3")
 project = rf.workspace("mongta-swaxu").project("mongta")
 model = project.version("3").model
 
+
 def allowed_file(filename: str) -> bool:
-    """ตรวจสอบว่านามสกุลไฟล์ที่อัปโหลดถูกต้องหรือไม่"""
+    """Check if the uploaded file has a valid extension."""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 
 def resize_image(image: Image.Image) -> Image.Image:
     """Resize the image to 640x640 if it is larger."""
@@ -44,10 +46,9 @@ def resize_image(image: Image.Image) -> Image.Image:
 
 def generate_ai_analysis(image_path: str, output_path: str):
     """
-    ใช้ Roboflow model เพื่อ generate annotated image (AI Analysis)
-    โดยเรียกใช้ model.predict (ไม่ใช้ save=True เนื่องจากไม่รองรับ)
-    จากนั้นใช้ผลลัพธ์ที่ได้ (predictions) annotate ภาพด้วย draw_boxes
-    แล้วบันทึกเป็น output_path
+    Use the Roboflow model to generate an annotated image (AI Analysis).
+    Calls model.predict (without save=True since it is not supported).
+    Then, annotates the image using draw_boxes and saves it to output_path.
     """
     result = model.predict(image_path, confidence=40, overlap=30)
     predictions = result.json()
@@ -88,6 +89,7 @@ def draw_boxes(image: Image.Image, predictions: dict) -> Image.Image:
     buf.seek(0)
     return Image.open(buf)
 
+
 @app.post("/upload-eye-predict")
 async def upload_eye_predict(
     right_eye: UploadFile = File(...),
@@ -100,37 +102,34 @@ async def upload_eye_predict(
     line_left: str = Form("")
 ):
     """
-    Endpoint สำหรับประมวลผลภาพตาขวาและตาซ้าย
-      - อ่านไฟล์โดยใช้:
-            right_eye_bytes = await right_eye.read()
-            left_eye_bytes = await left_eye.read()
-      - สร้าง PIL Images สำหรับแต่ละไฟล์
-      - ปรับขนาดและบันทึกไฟล์ชั่วคราวสำหรับใช้ตรวจจับวัตถุในแต่ละภาพตา
-      - เรียกใช้ Roboflow model ตรวจจับวัตถุในภาพตา
-      - หากไม่พบผลในภาพที่ปรับขนาดแล้ว ให้ลองใช้ detect_eyes เพื่อตรวจจับใหม่
-      - วาด bounding boxes บนภาพที่เลือก แล้วบันทึกเป็น predicted_{user_id}_right และ predicted_{user_id}_left
-      - ใช้ Roboflow model annotate สำหรับภาพตา
-      - ส่งคืน URL ของภาพตาและภาพ annotate ในรูปแบบ JSONResponse
+    Endpoint for processing right and left eye images:
+      - Read image files.
+      - Convert them to PIL images.
+      - Resize and save temporary files for object detection.
+      - Use the Roboflow model to detect objects in each eye image.
+      - If no objects are detected, try detect_eyes for further analysis.
+      - Draw bounding boxes and save predicted images.
+      - Annotate images using the Roboflow model.
+      - Return URLs of processed images and predictions as JSONResponse.
     """
-    # อ่านไฟล์และสร้าง PIL Images สำหรับภาพตา
+    # Read the uploaded images and convert them to PIL format
     right_eye_bytes = await right_eye.read()
     left_eye_bytes = await left_eye.read()
 
     right_eye_pil = Image.open(io.BytesIO(right_eye_bytes)).convert("RGB")
     left_eye_pil = Image.open(io.BytesIO(left_eye_bytes)).convert("RGB")
 
-    # กำหนด extension และ format (สมมุติว่าไฟล์ทั้งสองใช้ extension เดียวกัน)
+    # Determine the file extension and format
     image_extension = right_eye.filename.rsplit('.', 1)[-1].lower()
     pil_format = "JPEG" if image_extension in ["jpg", "jpeg"] else "PNG"
 
-    # ---------------------------
-    # ประมวลผลสำหรับภาพตาขวา
+    # Process the right eye image
     temp_right_path = os.path.join(OUTPUT_DIR, f"temp_right.{image_extension}")
     resized_right_image = resize_image(right_eye_pil)
     resized_right_image.save(temp_right_path, format=pil_format)
     predictions_right = model.predict(temp_right_path, confidence=40, overlap=30).json()
     if not predictions_right['predictions']:
-        # หากไม่พบ prediction ให้ลองใช้ detect_eyes กับภาพตาขวา
+        # If no predictions are detected, try using detect_eyes on the right eye image
         detected_right = detect_eyes(right_eye_pil)
         detected_right.save(temp_right_path, format=pil_format)
         predictions_right = model.predict(temp_right_path, confidence=40, overlap=30).json()
@@ -147,14 +146,13 @@ async def upload_eye_predict(
         output_right_predicted = output_right_predicted.convert('RGB')
     output_right_predicted.save(predicted_right_filename, format=pil_format)
 
-    # ---------------------------
-    # ประมวลผลสำหรับภาพตาซ้าย
+    # Process the left eye image
     temp_left_path = os.path.join(OUTPUT_DIR, f"temp_left.{image_extension}")
     resized_left_image = resize_image(left_eye_pil)
     resized_left_image.save(temp_left_path, format=pil_format)
     predictions_left = model.predict(temp_left_path, confidence=40, overlap=30).json()
     if not predictions_left['predictions']:
-        # หากไม่พบ prediction ให้ลองใช้ detect_eyes กับภาพตาซ้าย
+        # If no predictions are detected, try using detect_eyes on the left eye image
         detected_left = detect_eyes(left_eye_pil)
         detected_left.save(temp_left_path, format=pil_format)
         predictions_left = model.predict(temp_left_path, confidence=40, overlap=30).json()
@@ -171,12 +169,12 @@ async def upload_eye_predict(
         output_left_predicted = output_left_predicted.convert('RGB')
     output_left_predicted.save(predicted_left_filename, format=pil_format)
 
-    # ลบไฟล์ชั่วคราว
+    # Remove temporary files
     if os.path.exists(temp_right_path): os.remove(temp_right_path)
     if os.path.exists(temp_left_path): os.remove(temp_left_path)
 
-    # ---------------------------
-    # Annotate ภาพตาโดยใช้ Roboflow model
+
+    # Save the original and AI analysis images
     original_right_path = os.path.join(OUTPUT_DIR, f"{user_id}_right.png")
     original_left_path = os.path.join(OUTPUT_DIR, f"{user_id}_left.png")
     right_eye_pil.save(original_right_path, format="PNG")
@@ -187,10 +185,11 @@ async def upload_eye_predict(
     generate_ai_analysis(original_right_path, ai_right_path)
     generate_ai_analysis(original_left_path, ai_left_path)
 
-        # ตรวจสอบผลลัพธ์ว่าเป็น "Normal" หรือไม่
+    
     right_eye_classes = [pred['class'] for pred in predictions_right['predictions']]
     left_eye_classes = [pred['class'] for pred in predictions_left['predictions']]
 
+    # Check if the eyes are normal or have abnormalities
     if all(cls == "Normal" for cls in right_eye_classes) and all(cls == "Normal" for cls in left_eye_classes):
         pic_description = "ยังไม่พบสิ่งผิดปกติบนดวงตาข้างซ้ายเเละข้างขวา"
     elif any(cls != "Normal" for cls in right_eye_classes) and any(cls != "Normal" for cls in left_eye_classes):
@@ -203,7 +202,7 @@ async def upload_eye_predict(
         pic_description = "ยังไม่สามารถระบุผลลัพธ์ได้"
 
 
-    # ส่งคืน URL ของภาพที่ประมวลผล
+    # check if the eyes are normal or have abnormalities
     return JSONResponse({
         "status": "success",
         "right_eye": f"http://127.0.0.1:8000/output/{user_id}_right.png",
@@ -220,7 +219,7 @@ async def upload_eye_predict(
         "line_left": line_left,
     })
 
-# ให้ FastAPI ให้บริการไฟล์ที่เก็บไว้ใน OUTPUT_DIR ผ่าน URL /output
+# Mount the output directory to serve the processed images
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 if __name__ == "__main__":
