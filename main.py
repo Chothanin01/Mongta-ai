@@ -61,8 +61,23 @@ def allowed_file(filename: str) -> bool:
 
 def encode_image_to_base64(image_path: str) -> str:
     """Convert image to Base64 string for easier transport"""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode("utf-8")
+    try:
+        # Open image and ensure it's in RGB mode before encoding
+        image = Image.open(image_path)
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+            
+        # Save to a byte buffer in JPEG format
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        buffer.seek(0)
+        
+        # Encode to base64
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    except Exception as e:
+        print(f"Error encoding image {image_path}: {e}")
+        # Return a placeholder if encoding fails
+        return ""
 
 def resize_image(image: Image.Image) -> Image.Image:
     """Resize the image to 640x640 if it is larger"""
@@ -112,7 +127,8 @@ def draw_boxes(image: Image.Image, predictions: dict) -> Image.Image:
     plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     buf.seek(0)
-    return Image.open(buf)
+    # Convert RGBA to RGB before returning
+    return Image.open(buf).convert("RGB")
 
 @app.post("/api-ai/upload-eye-predict", summary="Upload and analyze eye images")
 async def analyze_eye_scan(
@@ -184,6 +200,11 @@ async def analyze_eye_scan(
 
         output_right_predicted = draw_boxes(final_right, predictions_right)
         output_left_predicted = draw_boxes(final_left, predictions_left)
+
+        # Add this conversion to ensure we're saving RGB images without alpha channel
+        if image_extension.lower() in ['jpg', 'jpeg']:
+            output_right_predicted = output_right_predicted.convert('RGB')
+            output_left_predicted = output_left_predicted.convert('RGB')
 
         output_right_predicted.save(predicted_right_path, format=pil_format)
         output_left_predicted.save(predicted_left_path, format=pil_format)
@@ -297,7 +318,7 @@ async def analyze_eye_scan(
         # POST back to http://localhost:3000/api/savescanlog
         async with httpx.AsyncClient() as server:
             response = await server.post(
-                "http://localhost:3000/api/savescanlog",
+                "http://localhost:5000/api/savescanlog",
                 json=result
                 # content=multipart_data.to_string(),
                 # headers=headers
