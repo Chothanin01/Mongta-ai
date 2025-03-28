@@ -301,17 +301,17 @@ async def analyze_eye_scan(
         }
         
         # POST back to http://localhost:3000/api/savescanlog
-        async with httpx.AsyncClient() as server:
-            response = await server.post(
-                "http://localhost:3000/api/savescanlog",
-                json=result
-                # content=multipart_data.to_string(),
-                # headers=headers
-                )
+        # async with httpx.AsyncClient() as server:
+        #     response = await server.post(
+        #         "http://localhost:3000/api/savescanlog",
+        #         json=result
+        #         # content=multipart_data.to_string(),
+        #         # headers=headers
+        #         )
 
         # # Verify that the Node.js server is responding correctly
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to send data to Node.js API")
+        # if response.status_code != 200:
+        #     raise HTTPException(status_code=500, detail="Failed to send data to Node.js API")
 
         return JSONResponse(content=result)
 
