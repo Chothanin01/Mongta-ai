@@ -16,7 +16,6 @@ import cv2
 import numpy as np
 import httpx
 import base64
-import time
 import tempfile
 
 # Prevents Matplotlib from requiring a display
@@ -64,8 +63,8 @@ def encode_image_to_base64(image_path: str) -> str:
 def resize_image(image: Image.Image) -> Image.Image:
     """Resize the image to 256x256 if it is larger"""
     width, height = image.size
-    if width > 256 or height > 256:
-        return image.resize((256, 256))
+    if width > 640 or height > 640:
+        return image.resize((640, 640))
     return image
 
 def detect_eyes(image: Image.Image) -> Image.Image:
@@ -142,7 +141,6 @@ async def analyze_eye_scan(
     right_eye: UploadFile = File(...),
     left_eye: UploadFile = File(...),
 ):
-    start_time = time.time()
     try:
         if not right_eye or not left_eye:
             raise HTTPException(status_code=400, detail="Right eye and left eye images are required.")
