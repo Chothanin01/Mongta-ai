@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 import httpx
 import base64
+import tempfile
 
 # Prevents Matplotlib from requiring a display
 matplotlib.use('Agg')
@@ -41,11 +42,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Allowed file types for uploaded images
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
 MIME_TYPES = {"jpg": "image/jpg", "jpeg": "image/jpeg", "png": "image/png"}
-
-# Initialize Roboflow AI model
-rf = Roboflow(api_key="mJRJtBYRhInoDZPAzrv3")
-project = rf.workspace("mongta-swaxu").project("mongta")
-model = project.version("3").model
 
 class ScanResult(BaseModel):
     """Data model for storing eye scan results"""
@@ -80,7 +76,7 @@ def encode_image_to_base64(image_path: str) -> str:
         return ""
 
 def resize_image(image: Image.Image) -> Image.Image:
-    """Resize the image to 640x640 if it is larger"""
+    """Resize the image to 256x256 if it is larger"""
     width, height = image.size
     if width > 640 or height > 640:
         return image.resize((640, 640))
@@ -107,7 +103,7 @@ async def generate_ai_analysis(image_path: str, output_path: str):
         predictions = result.json()
         image = Image.open(image_path)
         annotated_image = draw_boxes(image, predictions)
-        annotated_image.save(output_path)
+        annotated_image.convert("RGB").save(output_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error in AI analysis: {str(e)}")
 
@@ -115,13 +111,19 @@ def draw_boxes(image: Image.Image, predictions: dict) -> Image.Image:
     """Draw bounding boxes around detected objects in the image using Matplotlib"""
     fig, ax = plt.subplots(figsize=(10, 10))
     ax.imshow(image)
+
     for pred in predictions['predictions']:
         x, y, width, height = pred['x'], pred['y'], pred['width'], pred['height']
-        x1, y1, x2, y2 = x - width/2, y - height/2, x + width/2, y + height/2
-        rect = plt.Rectangle((x1, y1), width, height, linewidth=2, edgecolor='red', facecolor='none')
+        x1, y1 = x - width / 2, y - height / 2
+
+        # ใช้สี #12358F สำหรับกรอบและข้อความ
+        custom_color = '#12358F'
+        rect = plt.Rectangle((x1, y1), width, height, linewidth=2, edgecolor=custom_color, facecolor='none')
         ax.add_patch(rect)
-        ax.text(x1, y1 - 10, f"{pred['class']}", color='red', fontsize=12,
-                bbox=dict(facecolor='yellow', alpha=0.5))
+        ax.text(
+            x1, y1 - 10, f"{pred['class']}", color=custom_color, fontsize=12,
+            bbox=dict(facecolor='white', edgecolor=custom_color, boxstyle='round,pad=0.3', linewidth=1.5)
+        )
     ax.axis("off")
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
@@ -129,6 +131,20 @@ def draw_boxes(image: Image.Image, predictions: dict) -> Image.Image:
     buf.seek(0)
     # Convert RGBA to RGB before returning
     return Image.open(buf).convert("RGB")
+
+async def predict_image_memory(image: Image.Image, confidence=40, overlap=30):
+    """Predict by temporarily saving image to a secure temp file path"""
+    with tempfile.NamedTemporaryFile(suffix=".png") as temp:
+        image.save(temp.name, format="PNG")
+        result = await asyncio.to_thread(model.predict, temp.name, confidence=confidence, overlap=overlap)
+    return result.json()
+
+@app.on_event("startup")
+async def startup_event():
+    global model
+    rf = Roboflow(api_key="mJRJtBYRhInoDZPAzrv3")
+    project = rf.workspace("mongta-swaxu").project("mongta")
+    model = project.version("3").model
 
 @app.post("/api-ai/upload-eye-predict", summary="Upload and analyze eye images")
 async def analyze_eye_scan(
@@ -167,67 +183,83 @@ async def analyze_eye_scan(
         resized_right_image = resize_image(right_eye_pil)
         resized_left_image = resize_image(left_eye_pil)
 
+        predictions_right, predictions_left = await asyncio.gather(
+        predict_image_memory(resized_right_image),
+        predict_image_memory(resized_left_image)
+        )
         # AI Processing for Right Eye
-        temp_right_path = os.path.join(OUTPUT_DIR, f"temp_right.{image_extension}")
-        resized_right_image.save(temp_right_path, format=pil_format)
-        predictions_right = model.predict(temp_right_path, confidence=40, overlap=30).json()
-
         if not predictions_right['predictions']:
-            # If no AI detection, use `detect_eyes`
-            detected_right = detect_eyes(right_eye_pil)
-            detected_right.save(temp_right_path, format=pil_format)
-            predictions_right = model.predict(temp_right_path, confidence=40, overlap=30).json()
-            final_right = detected_right if predictions_right['predictions'] else resized_right_image
+            detected_right = detect_eyes(right_eye_pil).convert("RGB")
+            predictions_right_retry = await predict_image_memory(detected_right)
+
+            if predictions_right_retry['predictions']:
+                final_right = detected_right
+                predictions_right = predictions_right_retry
+                image_for_drawing_right = detected_right
+            else:
+                final_right = resized_right_image
+                image_for_drawing_right = resized_right_image
         else:
             final_right = resized_right_image
+            image_for_drawing_right = resized_right_image
 
         # AI Processing for Left Eye
-        temp_left_path = os.path.join(OUTPUT_DIR, f"temp_left.{image_extension}")
-        resized_left_image.save(temp_left_path, format=pil_format)
-        predictions_left = model.predict(temp_left_path, confidence=40, overlap=30).json()
-
         if not predictions_left['predictions']:
-            detected_left = detect_eyes(left_eye_pil)
-            detected_left.save(temp_left_path, format=pil_format)
-            predictions_left = model.predict(temp_left_path, confidence=40, overlap=30).json()
-            final_left = detected_left if predictions_left['predictions'] else resized_left_image
+            detected_left = detect_eyes(left_eye_pil).convert("RGB")
+            predictions_left_retry = await predict_image_memory(detected_left)
+
+            if predictions_left_retry['predictions']:
+                final_left = detected_left
+                predictions_left = predictions_left_retry
+                image_for_drawing_left = detected_left
+            else:
+                final_left = resized_left_image
+                image_for_drawing_left = resized_left_image
         else:
             final_left = resized_left_image
+            image_for_drawing_left = resized_left_image
 
         # Draw AI Predictions
         predicted_right_path = os.path.join(OUTPUT_DIR, f"predicted_{user_id}_right.{image_extension}")
         predicted_left_path = os.path.join(OUTPUT_DIR, f"predicted_{user_id}_left.{image_extension}")
 
-        output_right_predicted = draw_boxes(final_right, predictions_right)
-        output_left_predicted = draw_boxes(final_left, predictions_left)
+        # output_right_predicted = draw_boxes(final_right, predictions_right)
+        output_left_predicted = draw_boxes(image_for_drawing_left, predictions_left)
+        output_right_predicted = draw_boxes(image_for_drawing_right, predictions_right)
+        # output_left_predicted = draw_boxes(image_for_drawing_left, predictions_left)
 
-        # Add this conversion to ensure we're saving RGB images without alpha channel
-        if image_extension.lower() in ['jpg', 'jpeg']:
-            output_right_predicted = output_right_predicted.convert('RGB')
-            output_left_predicted = output_left_predicted.convert('RGB')
-
-        output_right_predicted.save(predicted_right_path, format=pil_format)
-        output_left_predicted.save(predicted_left_path, format=pil_format)
-
-        # Remove temporary files
-        if os.path.exists(temp_right_path): os.remove(temp_right_path)
-        if os.path.exists(temp_left_path): os.remove(temp_left_path)
+        output_right_predicted.convert("RGB").save(predicted_right_path, format=pil_format)
+        output_left_predicted.convert("RGB").save(predicted_left_path, format=pil_format)
 
         # Save original and AI-processed images
         original_right_path = os.path.join(OUTPUT_DIR, f"{user_id}_right.{image_extension}")
         original_left_path = os.path.join(OUTPUT_DIR, f"{user_id}_left.{image_extension}")
-        right_eye_pil.save(original_right_path, format="PNG")
-        left_eye_pil.save(original_left_path, format="PNG")
+        final_right.convert("RGB").save(original_right_path, format="PNG")
+        final_left.convert("RGB").save(original_left_path, format="PNG")
 
-        ai_right_path = os.path.join(OUTPUT_DIR, f"{user_id}_ai_right.{image_extension}")
-        ai_left_path = os.path.join(OUTPUT_DIR, f"{user_id}_ai_left.{image_extension}")
-        await generate_ai_analysis(original_right_path, ai_right_path)
-        await generate_ai_analysis(original_left_path, ai_left_path)
+        await asyncio.gather(
+        generate_ai_analysis(original_right_path, predicted_right_path),
+        generate_ai_analysis(original_left_path, predicted_left_path)
+        )
 
-        # Generate eye health descriptions
+        # # Generate eye health descriptions
         right_eye_classes = [pred['class'] for pred in predictions_right['predictions']]
         left_eye_classes = [pred['class'] for pred in predictions_left['predictions']]
 
+        # รายชื่อโรคเป็นภาษาไทย
+        disease_map = {
+            "Cataract": "ต้อกระจก",
+            "Conjunctivitis": "ตาแดง",
+            "Normal": "ปกติ",
+            "Pterygium": "ต้อเนื้อ",
+            "Stye": "ตากุ้งยิง"
+        }
+
+        # แปลชื่อโรค
+        right_eye_translated = [disease_map.get(cls, cls) for cls in right_eye_classes]
+        left_eye_translated = [disease_map.get(cls, cls) for cls in left_eye_classes]
+
+        # รายงานภาพรวม
         if all(cls == "Normal" for cls in right_eye_classes) and all(cls == "Normal" for cls in left_eye_classes):
             pic_description = "ยังไม่พบสิ่งผิดปกติบนดวงตาข้างซ้ายเเละข้างขวา"
         elif any(cls != "Normal" for cls in right_eye_classes) and any(cls != "Normal" for cls in left_eye_classes):
@@ -238,47 +270,36 @@ async def analyze_eye_scan(
             pic_description = "พบความผิดปกติที่ดวงตาข้างซ้าย"
         else:
             pic_description = "ยังไม่สามารถระบุผลลัพธ์ได้"
-        
-        # Generate eye health descriptions
-        right_eye_classes = [pred.get('class', 'Unknown') for pred in predictions_right.get('predictions', [])]
-        left_eye_classes = [pred.get('class', 'Unknown') for pred in predictions_left.get('predictions', [])]
 
-        # Format descriptions for better clarity
-        right_eye_description = "การสเเกนดวงตาขวายังไม่พบเจอสิ่งผิดปกติ" if all(cls == "Normal" for cls in right_eye_classes) else \
-                                f"การสเเกนดวงตาขวาพบความผิดปกติ ({', '.join(set(right_eye_classes))})"
-                                
-        left_eye_description = "การสเเกนดวงตาซ้ายยังไม่พบเจอสิ่งผิดปกติ" if all(cls == "Normal" for cls in left_eye_classes) else \
-                               f"การสเเกนดวงตาซ้ายพบความผิดปกติ ({', '.join(set(left_eye_classes))})"
-        
-        # Eye risk level
+        # รายงานรายตา
+        right_eye_description = "การสเเกนดวงตาขวายังไม่พบเจอสิ่งผิดปกติ" if all(cls == "ปกติ" for cls in right_eye_translated) else \
+            f"การสเเกนดวงตาขวาพบความผิดปกติ อาจมีอาการ {' '.join(set(right_eye_translated))}"
+
+        left_eye_description = "การสเเกนดวงตาซ้ายยังไม่พบเจอสิ่งผิดปกติ" if all(cls == "ปกติ" for cls in left_eye_translated) else \
+            f"การสเเกนดวงตาซ้ายพบความผิดปกติ อาจมีอาการ {' '.join(set(left_eye_translated))}"
+
+        # ระดับความเสี่ยง
         risk_levels = ["ปกติ", "เริ่มมีความผิดปกติ", "มีความผิดปกติ"]
-
-        # Detect anomaly levels from near_description
         if "มีความผิดปกติ" in near_description:
-            risk_level = risk_levels[2]  # There is an abnormality.
+            risk_level = risk_levels[2]
         elif "เริ่มมีความผิดปกติ" in near_description:
-            risk_level = risk_levels[1]  # Starting to have abnormalities
+            risk_level = risk_levels[1]
         else:
-            risk_level = risk_levels[0]  # normal
+            risk_level = risk_levels[0]
 
-        # Check the eye scan results
+        # รายงานสรุป
         if all(cls == "Normal" for cls in right_eye_classes) and all(cls == "Normal" for cls in left_eye_classes):
-            description = f"เบื้องต้นมีค่าสายตาทั้งซ้ายและขวา อยู่ในระดับ{risk_level}แต่การสแกนดวงตายังไม่พบสิ่งผิดปกติ"
+            description = f"เบื้องต้นพบว่าค่าสายตาทั้งสองข้างอยู่ในระดับ{risk_level} และไม่พบความผิดปกติจากการสแกนดวงตา"
         elif any(cls != "Normal" for cls in right_eye_classes) and any(cls != "Normal" for cls in left_eye_classes):
-            description = f"เบื้องต้นมีค่าสายตาทั้งซ้ายและขวา อยู่ในระดับ{risk_level}พบความผิดปกติที่ดวงตาทั้งสองข้าง ({', '.join(set(right_eye_classes + left_eye_classes))})"
+            description = f"เบื้องต้นพบว่าค่าสายตาทั้งสองข้างอยู่ในระดับ{risk_level} และพบความผิดปกติที่ดวงตาทั้งสองข้าง อาจมีอาการ {' '.join(set(right_eye_translated + left_eye_translated))}"
         elif any(cls != "Normal" for cls in right_eye_classes):
-            description = f"เบื้องต้นมีค่าสายตาทั้งซ้ายและขวา อยู่ในระดับ{risk_level}พบความผิดปกติที่ดวงตาข้างขวา ({', '.join(set(right_eye_classes))})"
+            description = f"เบื้องต้นพบว่าค่าสายตาทั้งสองข้างอยู่ในระดับ{risk_level} และพบความผิดปกติที่ดวงตาข้างขวา อาจมีอาการ {' '.join(set(right_eye_translated))}"
         elif any(cls != "Normal" for cls in left_eye_classes):
-            description = f"เบื้องต้นมีค่าสายตาทั้งซ้ายและขวา อยู่ในระดับ{risk_level}พบความผิดปกติที่ดวงตาข้างซ้าย ({', '.join(set(left_eye_classes))})"
+            description = f"เบื้องต้นพบว่าค่าสายตาทั้งสองข้างอยู่ในระดับ{risk_level} และพบความผิดปกติที่ดวงตาข้างซ้าย อาจมีอาการ {' '.join(set(left_eye_translated))}"
         else:
-            description = f"เบื้องต้นมีค่าสายตาทั้งซ้ายและขวา อยู่ในระดับ{risk_level}แต่ยังไม่สามารถระบุผลลัพธ์ได้"
-
+            description = f"เบื้องต้นพบว่าค่าสายตาทั้งสองข้างอยู่ในระดับ{risk_level}แต่ยังไม่สามารถระบุผลลัพธ์จากการสแกนได้"
+        
         result = {
-            # "status": "success",
-            # "right_eye": f"http://127.0.0.1:8000/outputs/{os.path.basename(original_right_path)}",
-            # "left_eye": f"http://127.0.0.1:8000/outputs/{os.path.basename(original_left_path)}",
-            # "ai_right": f"http://127.0.0.1:8000/outputs/{os.path.basename(predicted_right_path)}",
-            # "ai_left": f"http://127.0.0.1:8000/outputs/{os.path.basename(predicted_left_path)}",
             "right_eye": encode_image_to_base64(original_right_path),
             "left_eye": encode_image_to_base64(original_left_path),
             "ai_left_image_base64": encode_image_to_base64(predicted_left_path),
@@ -295,41 +316,20 @@ async def analyze_eye_scan(
             "line_left": line_left,
         }
         
-        # MultipartEncoder `multipart/form-data`
-        # multipart_data = MultipartEncoder(
-        #     fields={
-        #         "user_id" : user_id,
-        #         "right_eye" : (right_eye.filename, open(right_eye_path, "rb"), right_eye.content_type),
-        #         "left_eye": (left_eye.filename, open(left_eye_path, "rb"), left_eye.content_type),
-        #         "description": description,
-        #         "va_right": va_right,
-        #         "va_left": va_left,
-        #         "near_description": near_description,
-        #         "pic_description": pic_description,
-        #         "pic_right_description": right_eye_description,
-        #         "pic_left_description": left_eye_description,
-        #         "line_right": line_right,
-        #         "line_left": line_left,
-        #     }
-        # )
-
-        # headers = {"Content-Type": multipart_data.content_type}
-
         # POST back to http://localhost:3000/api/savescanlog
-        async with httpx.AsyncClient() as server:
-            response = await server.post(
-                "http://localhost:5000/api/savescanlog",
-                json=result
-                # content=multipart_data.to_string(),
-                # headers=headers
-                )
+        # async with httpx.AsyncClient() as server:
+        #     response = await server.post(
+        #         "http://localhost:3000/api/savescanlog",
+        #         json=result
+        #         # content=multipart_data.to_string(),
+        #         # headers=headers
+        #         )
 
-        # Verify that the Node.js server is responding correctly
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to send data to Node.js API")
+        # # Verify that the Node.js server is responding correctly
+        # if response.status_code != 200:
+        #     raise HTTPException(status_code=500, detail="Failed to send data to Node.js API")
 
         return JSONResponse(content=result)
-        # return JSONResponse(content={"success": True, "message": "Scan log saved successfully."})
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error analyzing eye scan: {str(e)}")
