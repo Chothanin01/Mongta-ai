@@ -1,4 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from requests_toolbelt.multipart.encoder import MultipartEncoder
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from roboflow import Roboflow
+import os
+import uvicorn
 from pydantic import BaseModel
 import matplotlib
 import matplotlib.pyplot as plt
@@ -10,34 +17,31 @@ import numpy as np
 import httpx
 import base64
 import tempfile
-import uuid
-import shutil
 
+# Prevents Matplotlib from requiring a display
+matplotlib.use('Agg')
 
+# Initialize FastAPI application
 app = FastAPI()
 
-# Get example
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+# Enable CORS to allow cross-origin requests from Node.js
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Define directories for uploads and outputs
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "outputs"
-TEMP_DIR = "temp_files"  # New custom temp directory
-
-# Create all required directories
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(TEMP_DIR, exist_ok=True)  # Ensure temp directory exists
 
-# Configure tempfile to use our custom directory
-tempfile.tempdir = TEMP_DIR
-
-# Post example
-@app.post("/items/")
-def create_item(item: Item):
-    return item
+# Allowed file types for uploaded images
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
+MIME_TYPES = {"jpg": "image/jpg", "jpeg": "image/jpeg", "png": "image/png"}
 
 class ScanResult(BaseModel):
     """Data model for storing eye scan results"""
@@ -95,16 +99,12 @@ def detect_eyes(image: Image.Image) -> Image.Image:
 async def generate_ai_analysis(image_path: str, output_path: str):
     """Runs Roboflow AI asynchronously and saves the analyzed image"""
     try:
-        # Use our customized predict function rather than direct model calls
         result = await asyncio.to_thread(model.predict, image_path, confidence=40, overlap=30)
         predictions = result.json()
-        
-        # Open and process the image
-        with Image.open(image_path) as image:
-            annotated_image = draw_boxes(image, predictions)
-            annotated_image.convert("RGB").save(output_path)
+        image = Image.open(image_path)
+        annotated_image = draw_boxes(image, predictions)
+        annotated_image.convert("RGB").save(output_path)
     except Exception as e:
-        print(f"Error in AI analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error in AI analysis: {str(e)}")
 
 def draw_boxes(image: Image.Image, predictions: dict) -> Image.Image:
@@ -133,28 +133,11 @@ def draw_boxes(image: Image.Image, predictions: dict) -> Image.Image:
     return Image.open(buf).convert("RGB")
 
 async def predict_image_memory(image: Image.Image, confidence=40, overlap=30):
-    """Predict using a custom temporary file management approach"""
-    # Generate a unique filename
-    unique_filename = f"{uuid.uuid4()}.png"
-    temp_path = os.path.join(TEMP_DIR, unique_filename)
-    
-    try:
-        # Save image to our custom temp directory
-        image.save(temp_path, format="PNG")
-        
-        # Run prediction
-        result = await asyncio.to_thread(model.predict, temp_path, confidence=confidence, overlap=overlap)
-        return result.json()
-    except Exception as e:
-        print(f"Error in prediction: {str(e)}")
-        raise e
-    finally:
-        # Clean up - make sure the file is removed
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception as cleanup_error:
-                print(f"Warning: Failed to clean up temp file {temp_path}: {cleanup_error}")
+    """Predict by temporarily saving image to a secure temp file path"""
+    with tempfile.NamedTemporaryFile(suffix=".png") as temp:
+        image.save(temp.name, format="PNG")
+        result = await asyncio.to_thread(model.predict, temp.name, confidence=confidence, overlap=overlap)
+    return result.json()
 
 @app.on_event("startup")
 async def startup_event():
@@ -353,22 +336,6 @@ async def analyze_eye_scan(
 
 # Serve processed images
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up temporary files on application shutdown"""
-    try:
-        # Clear all files in the temp directory
-        for filename in os.listdir(TEMP_DIR):
-            file_path = os.path.join(TEMP_DIR, filename)
-            try:
-                if os.path.isfile(file_path):
-                    os.unlink(file_path)
-            except Exception as e:
-                print(f"Failed to delete {file_path}: {e}")
-        print("Temporary files cleaned up successfully")
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
